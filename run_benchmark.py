@@ -1151,9 +1151,18 @@ def infer_family(model: str) -> str:
     return "other"
 
 
-def _collect_itbench_lite_scenarios(domains: set[str]) -> dict[str, list[str]]:
-    repo = "ibm-research/ITBench-Lite"
-    files = list_repo_files(repo_id=repo, repo_type="dataset")
+def _collect_itbench_lite_scenarios(
+    domains: set[str], dataset_path: str = ""
+) -> dict[str, list[str]]:
+    if dataset_path:
+        dataset_root = Path(dataset_path)
+        files = [
+            p.relative_to(dataset_root).as_posix()
+            for p in dataset_root.rglob("ground_truth.yaml")
+        ]
+    else:
+        repo = "ibm-research/ITBench-Lite"
+        files = list_repo_files(repo_id=repo, repo_type="dataset")
     gt_files = [f for f in files if f.endswith("/ground_truth.yaml")]
     grouped: dict[str, list[str]] = {"finops": [], "sre": []}
     for path in gt_files:
@@ -1167,7 +1176,12 @@ def _collect_itbench_lite_scenarios(domains: set[str]) -> dict[str, list[str]]:
     return grouped
 
 
-def _download_itbench_file(repo_id: str, filename: str) -> str:
+def _download_itbench_file(repo_id: str, filename: str, dataset_path: str = "") -> str:
+    if dataset_path:
+        local_path = Path(dataset_path) / filename
+        if not local_path.exists():
+            raise FileNotFoundError(f"Missing ITBench-Lite file: {local_path}")
+        return str(local_path)
     return hf_hub_download(repo_id=repo_id, repo_type="dataset", filename=filename)
 
 
@@ -1207,9 +1221,13 @@ def load_itbench_lite_subset(
     per_level: int,
     seed: int,
     all_tasks: bool,
+    dataset_path: str = "",
 ) -> list[dict]:
     repo = "ibm-research/ITBench-Lite"
-    grouped = _collect_itbench_lite_scenarios(domains)
+    if dataset_path:
+        grouped = _collect_itbench_lite_scenarios(domains, dataset_path=dataset_path)
+    else:
+        grouped = _collect_itbench_lite_scenarios(domains)
     rng = random.Random(seed)
     selected_paths = []
     for domain in sorted(grouped.keys()):
@@ -1224,7 +1242,10 @@ def load_itbench_lite_subset(
 
     rows = []
     for gt_rel in selected_paths:
-        gt_path = _download_itbench_file(repo, gt_rel)
+        if dataset_path:
+            gt_path = _download_itbench_file(repo, gt_rel, dataset_path=dataset_path)
+        else:
+            gt_path = _download_itbench_file(repo, gt_rel)
         gt = _load_yaml_file(gt_path)
         domain = "finops" if "/finops/" in gt_rel else "sre"
         scenario_root = gt_rel.rsplit("/ground_truth.yaml", 1)[0]
@@ -1243,8 +1264,16 @@ def load_itbench_lite_subset(
         if domain == "finops":
             anomaly_rel = f"{scenario_root}/anomaly.json"
             data_rel = f"{scenario_root}/data.csv"
-            anomaly_path = _download_itbench_file(repo, anomaly_rel)
-            data_path = _download_itbench_file(repo, data_rel)
+            if dataset_path:
+                anomaly_path = _download_itbench_file(
+                    repo, anomaly_rel, dataset_path=dataset_path
+                )
+                data_path = _download_itbench_file(
+                    repo, data_rel, dataset_path=dataset_path
+                )
+            else:
+                anomaly_path = _download_itbench_file(repo, anomaly_rel)
+                data_path = _download_itbench_file(repo, data_rel)
             try:
                 with open(anomaly_path, encoding="utf-8") as f:
                     anomaly = json.load(f)
@@ -1262,8 +1291,16 @@ def load_itbench_lite_subset(
         else:
             k8s_events_rel = f"{scenario_root}/k8s_events_raw.tsv"
             k8s_objects_rel = f"{scenario_root}/k8s_objects_raw.tsv"
-            k8s_events_path = _download_itbench_file(repo, k8s_events_rel)
-            k8s_objects_path = _download_itbench_file(repo, k8s_objects_rel)
+            if dataset_path:
+                k8s_events_path = _download_itbench_file(
+                    repo, k8s_events_rel, dataset_path=dataset_path
+                )
+                k8s_objects_path = _download_itbench_file(
+                    repo, k8s_objects_rel, dataset_path=dataset_path
+                )
+            else:
+                k8s_events_path = _download_itbench_file(repo, k8s_events_rel)
+                k8s_objects_path = _download_itbench_file(repo, k8s_objects_rel)
             scenario_dir = str(Path(k8s_events_path).parent)
             question = (
                 "ITBench-Lite SRE fault-localization from static snapshot files. "
@@ -1312,6 +1349,7 @@ def load_selected_questions(args) -> list[dict]:
         per_level=args.per_level,
         seed=args.seed,
         all_tasks=args.all_tasks,
+        dataset_path=str(getattr(args, "dataset_path", "") or "").strip(),
     )
 
 
@@ -1745,6 +1783,11 @@ def main():
     parser.add_argument("--out-dir", default="outputs")
     parser.add_argument("--itbench-domains", default="finops")
     parser.add_argument("--all-tasks", action="store_true")
+    parser.add_argument(
+        "--dataset-path",
+        default="",
+        help="Optional local ITBench-Lite dataset root path containing snapshots/.",
+    )
     parser.add_argument("--agent-mode", choices=["simple", "tool"], default="tool")
     parser.add_argument(
         "--require-native-tool-support",
@@ -1859,6 +1902,10 @@ def main():
     cache_file = args.tool_cache_file or str(out_dir / "tool_cache.json")
     configure_tool_cache(mode=args.tool_cache_mode, file_path=cache_file)
     print(f"Tool cache mode={args.tool_cache_mode} file={cache_file}")
+    if str(args.dataset_path or "").strip():
+        print(f"ITBench-Lite dataset source=local path={args.dataset_path}")
+    else:
+        print("ITBench-Lite dataset source=hub repo=ibm-research/ITBench-Lite")
     questions = load_selected_questions(args)
     scorer = resolve_scorer(args.scorer)
     print(f"Benchmark={args.benchmark} scorer={scorer}")
